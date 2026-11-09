@@ -1,0 +1,70 @@
+{
+  "native_ios_built": false,
+  "native_ios_device_tested": false,
+  "apple_simulator_run": false,
+  "swift_syntax_parser": "passed (6 Swift files, Linux Swift frontend; not Apple SDK type checking)",
+  "xcode_openstep_project": "parsed successfully, 55 objects",
+  "plist_storyboard_scheme_xml": "passed",
+  "offline_resources": {
+    "files": 32,
+    "bytes": 2162016256,
+    "sha256_verification": "passed"
+  },
+  "host_unit_tests": {
+    "passed": 22,
+    "skipped": 3,
+    "notes": "Browser suites are separate; Android ELF check is inapplicable to this iOS host suite.",
+    "python": "3.13.12",
+    "bundled_pure_packages": true,
+    "markupsafe_path": "Python\\site-packages\\markupsafe\\__init__.py"
+  },
+  "shared_browser_workflows": {
+    "passed": true,
+    "scenarios": [
+      "Chromium desktop 1280x900",
+      "Chromium phone 390x844",
+      "WebKit phone 390x844",
+      "WebKit iPad portrait 820x1180",
+      "WebKit iPad landscape 1180x820"
+    ]
+  },
+  "tutorial_browser_workflows": {
+    "passed": true,
+    "engines": [
+      "Chromium desktop",
+      "Chromium phone",
+      "WebKit phone"
+    ]
+  },
+  "final_static_splash_layout": {
+    "passed": true,
+    "sizes": [
+      "390x844",
+      "820x1180",
+      "1180x820",
+      "844x390"
+    ],
+    "artwork": "contain; full available frame; rounded help buttons over artwork; no motion"
+  },
+  "python_runtime": {
+    "source": "https://github.com/beeware/Python-Apple-support/releases/download/3.13-b18/Python-3.13-iOS-support.b18.tar.gz",
+    "sha256": "d06acf2a9c7964a8689566353a0e707402eff822037de5e29ba0e16040f7047d"
+  },
+  "pending_native_checks": [
+    "Apple SDK compile/link",
+    "Actual iOS SQLite preflight",
+    "Keychain and device lock",
+    "PDF visual/Unicode/export/share",
+    "iPad popovers and hardware keyboard",
+    "Native resource install/recovery",
+    "Background suspension and sync recovery",
+    "Signed archive validation"
+  ],
+  "startup_revision": {
+    "version": "1.0.3",
+    "study_verses": 30,
+    "artwork_hold_ms": 3000,
+    "native_apple_build_verified": false,
+    "android_hold_measured_ms": 3002
+  }
+}
