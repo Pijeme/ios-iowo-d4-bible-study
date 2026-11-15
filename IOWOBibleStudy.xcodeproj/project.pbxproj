@@ -246,8 +246,8 @@
       "buildSettings" = {
         "PRODUCT_BUNDLE_IDENTIFIER" = "org.iowo.d4.biblestudy";
         "PRODUCT_NAME" = "IOWOBibleStudy";
-        "MARKETING_VERSION" = "1.0.3";
-        "CURRENT_PROJECT_VERSION" = "4";
+        "MARKETING_VERSION" = "1.0.4";
+        "CURRENT_PROJECT_VERSION" = "5";
         "INFOPLIST_FILE" = "Sources/Info.plist";
         "SWIFT_OBJC_BRIDGING_HEADER" = "Sources/IOWOBibleStudy-Bridging-Header.h";
         "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
@@ -294,8 +294,8 @@
       "buildSettings" = {
         "PRODUCT_BUNDLE_IDENTIFIER" = "org.iowo.d4.biblestudy";
         "PRODUCT_NAME" = "IOWOBibleStudy";
-        "MARKETING_VERSION" = "1.0.3";
-        "CURRENT_PROJECT_VERSION" = "4";
+        "MARKETING_VERSION" = "1.0.4";
+        "CURRENT_PROJECT_VERSION" = "5";
         "INFOPLIST_FILE" = "Sources/Info.plist";
         "SWIFT_OBJC_BRIDGING_HEADER" = "Sources/IOWOBibleStudy-Bridging-Header.h";
         "ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";

@@ -48,3 +48,26 @@
 - Public iOS source excludes the large offline databases, extracted Apple runtime, local handoff archive, device evidence and test data. The original verified Apple support archive and vendored pure-Python packages are included.
 - `manage.py restore-library --from-archive` restores all manifest-listed reference files from the matching standalone APK or full local iOS handoff ZIP. Existing differing files are preserved; streamed SHA-256 checks and temporary-file cleanup were verified.
 - The complete local handoff remains the self-contained transfer option for the Mac developer. Native Apple build/testing remains pending.
+
+## Source-verified Bible spacing, 15 November 2026
+- Version 1.0.4 (5) ports website commit `6859a40` into the existing engine.
+- All 92,507 original source verse entries compared against the matching active
+  source hashes: 8,678 corrected verses and 9,495 missing spaces. No other text
+  changes were required. The same source-hashed insertion file ships on Android.
+- The installed reader is repaired at startup or after initial setup, with a
+  verified recovery backup and preserved old revisions, valid saved selections,
+  bookmarks, reading positions, red-letter ranges and chain links. A checksum
+  marker and setup checkpoint support safe retries without replacing user data.
+- Offline suite: 38 tests run, 35 passed, three skipped. All 12 maintenance/update
+  tests passed. Every corrected active verse and word offset was checked; database
+  foreign keys and red-letter ranges were validated.
+- BrowserTests separately enabled: passed in Chromium desktop/phone and WebKit at
+  iPhone, iPad portrait and iPad landscape sizes. Tutorial-only checks were not
+  rerun for this text-only change.
+- `manage.py verify` passed for all 32 original resources and the update checksum.
+  The original reference library hashes are retained for existing restore archives.
+- Update JSON is checked in with explicit LF endings to preserve its checksum
+  across Windows and Mac. The legacy backend file was normalized to LF.
+- Apple SDK compilation, device installation/signing and native iOS testing still
+  require a Mac. No App Store publication, production device upgrade or new
+  handoff ZIP is claimed. Personal databases and credentials are excluded.

@@ -4,13 +4,16 @@ Run with the website's .venv Python. All writes stay in .test-data; public
 library snapshots are read-only except for one isolated reader database copy.
 """
 from contextlib import closing
+import copy
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -275,6 +278,39 @@ class OfflineEngineTests(unittest.TestCase):
         self.assertIn('Open study source',page)
         self.assertIn('study='+item['id'],page)
         self.assertEqual(self.write('study-saves/'+item['id'],{},'DELETE').status_code,200)
+
+
+    def test_12_all_source_verified_spacing_corrections_are_readable_offline(self):
+        update_spec=self.app.resource_manifest['bible_spacing_update']
+        web=Path(self.app.static_folder).parent
+        update_path=web/update_spec['file']
+        self.assertEqual(file_hash(update_path),update_spec['sha256'])
+        update=json.loads(update_path.read_text(encoding='utf-8'))
+        self.assertEqual(update['scanned'],dict(NIV=31087,CEBOCB=30552,TCB=30868))
+        self.assertEqual(len(update['changes']),8678)
+        import bible_study
+        examples={}
+        with closing(sqlite3.connect(self.app.config['BIBLE_STUDY_DATABASE'])) as db:
+            db.row_factory=sqlite3.Row
+            for item in update['changes']:
+                row=db.execute('''SELECT v.* FROM bible_verses v JOIN bible_editions e ON e.id=v.edition_id
+                    WHERE e.translation=? AND e.is_active=1 AND v.is_active=1
+                    AND v.book_id=? AND v.chapter=? AND v.verse=?''',
+                    (item['translation'],item['book_id'],item['chapter'],item['verse'])).fetchone()
+                self.assertIsNotNone(row,item)
+                self.assertEqual(hashlib.sha256(row['text'].encode()).hexdigest(),item['after_sha256'])
+                for token in db.execute('SELECT start_offset,end_offset,text FROM bible_tokens WHERE verse_id=?',(row['id'],)):
+                    self.assertEqual(row['text'][token['start_offset']:token['end_offset']],token['text'])
+                for span in db.execute('SELECT start_offset,end_offset FROM bible_red_letter_spans WHERE verse_id=?',(row['id'],)):
+                    self.assertTrue(0<=span[0]<span[1]<=len(row['text']))
+                examples.setdefault(item['translation'],dict(item,text=row['text']))
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(),[])
+        with patch('requests.post',side_effect=AssertionError('Corrected Bible reading must work offline')):
+            for kind,item in examples.items():
+                response=self.client.get(API+'chapter',query_string=dict(book=bible_study.BOOKS[item['book_id']-1][0],
+                    chapter=item['chapter'],translation=kind))
+                self.assertEqual(response.status_code,200,response.data)
+                self.assertIn(item['text'],[v['text'] for v in response.get_json()['verses']])
 
 
 @unittest.skipUnless(os.environ.get('IOWO_BROWSER_TESTS') == '1', 'Set IOWO_BROWSER_TESTS=1 for Chromium and WebKit UI checks.')
@@ -958,5 +994,228 @@ class IOSBridgeTests(unittest.TestCase):
         import ios_bridge
         ios_bridge.preflight()
 
+
+class BibleSpacingMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        from offline_app import load_core
+        study=load_core(SimpleNamespace())
+        self.study=study
+        FakeBridge.calls.clear()
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        self.path=Path(directory.name)/'bible.db'
+        study.initialize_database(self.path)
+        self.plan=dict(schema_version=1,source_hashes={},changes=[],scanned={kind:1 for kind in ('NIV','CEBOCB','TCB')})
+        with closing(sqlite3.connect(self.path)) as db, db:
+            for index,kind in enumerate(('NIV','CEBOCB','TCB'),1):
+                digest=hashlib.sha256(kind.encode()).hexdigest();self.plan['source_hashes'][kind]=digest
+                db.execute("INSERT INTO bible_sources(id,title,sha256,source_path,created_at) VALUES(?,? ,?,'synthetic','now')",(index,'Synthetic '+kind,digest))
+                db.execute("INSERT INTO bible_import_runs(id,source_id,status,started_at) VALUES(?,?,'validated','now')",(index,index))
+                db.execute("INSERT INTO bible_editions(id,source_id,import_run_id,edition_key,translation,title,status,is_active) VALUES(?,?,?, ?,?,'Synthetic','ready',1)",(index,index,index,kind+':'+digest,kind))
+                before='AlphaBeta gamma.';after='Alpha Beta gamma.'
+                db.execute('INSERT INTO bible_verses(id,edition_id,book_id,chapter,verse,text,content_hash) VALUES(?,?,1,1,1,?,?)',(index,index,before,hashlib.sha256(before.encode()).hexdigest()))
+                for number,match in enumerate(re.finditer(r'\w+',before)):
+                    db.execute('INSERT INTO bible_tokens(verse_id,token_index,start_offset,end_offset,text) VALUES(?,?,?,?,?)',(index,number,match.start(),match.end(),match[0]))
+                self.plan['changes'].append(dict(translation=kind,verse_id=index,book_id=1,chapter=1,verse=1,before=before,after=after,source_sha256=digest))
+            db.execute("INSERT INTO bible_annotations VALUES('mark','member:one',1,'group','highlight',5,9,'Beta','yellow','Keep my note',1,'old','old')")
+            db.execute("INSERT INTO bible_annotations VALUES('joined','member:two',1,'group2','note',0,9,'AlphaBeta','','Keep this private text',1,'old','old')")
+            db.execute("INSERT INTO bible_bookmarks VALUES('bookmark','member:one',1,5,'My label','old','old')")
+            db.execute("INSERT INTO bible_navigation_history VALUES(1,'member:one',1,'old')")
+            db.execute("INSERT INTO bible_reader_state(user_key,edition_id,book_id,chapter,verse,character_offset,updated_at) VALUES('member:one',1,1,1,1,5,'old')")
+            db.execute("INSERT INTO bible_red_letter_spans(verse_id,start_offset,end_offset,speaker,evidence_source_id,evidence_locator) VALUES(1,0,9,'Jesus',1,'Synthetic source')")
+            db.execute("INSERT INTO bible_chain_topics VALUES(1,1,'topic','Synthetic topic','[]',1)")
+            db.execute('INSERT INTO bible_chain_verses VALUES(1,1)')
+
+    def test_usfm_closing_styles_preserve_explicit_source_spaces(self):
+        plain=self.study._usfm_plain
+        self.assertEqual(plain(r'\nd Alpha\nd* Beta'),'Alpha Beta')
+        self.assertEqual(plain(r'Alpha \add Beta\add* gamma'),'Alpha Beta gamma')
+        self.assertEqual(plain(r'Al\it pha\it*Beta'),'AlphaBeta')
+        self.assertEqual(plain(r'\add Alpha \+it Beta\+it* gamma\add* delta'),'Alpha Beta gamma delta')
+
+    def test_dry_run_never_modifies_live_data(self):
+        before=self.path.read_bytes()
+        report=self.study.repair_bible_spacing(self.path,self.plan,dry_run=True)
+        self.assertEqual(report['status'],'validated')
+        self.assertEqual(len(report['changes']),3)
+        self.assertEqual(self.path.read_bytes(),before)
+        self.assertFalse((self.path.parent/'backups').exists())
+
+    def test_revisions_tokens_colors_and_personal_anchors_are_preserved(self):
+        report=self.study.repair_bible_spacing(self.path,self.plan)
+        self.assertEqual(report['status'],'completed')
+        self.assertTrue(Path(report['backup']).is_file())
+        self.assertEqual(report['anchors'],dict(annotations=2,bookmarks=1,history=1,reader_positions=1,deferred=0))
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.row_factory=sqlite3.Row
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM bible_verses WHERE is_active=1').fetchone()[0],3)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM bible_verses').fetchone()[0],6)
+            for change in report['changes']:
+                old=db.execute('SELECT * FROM bible_verses WHERE id=?',(change['verse_id'],)).fetchone()
+                new=db.execute('SELECT * FROM bible_verses WHERE id=?',(change['new_verse_id'],)).fetchone()
+                self.assertEqual((old['text'],old['is_active'],old['revision']),('AlphaBeta gamma.',0,1))
+                self.assertEqual((new['text'],new['is_active'],new['revision']),('Alpha Beta gamma.',1,2))
+                self.assertEqual(new['content_hash'],hashlib.sha256(new['text'].encode()).hexdigest())
+                for token in db.execute('SELECT * FROM bible_tokens WHERE verse_id=?',(new['id'],)):
+                    self.assertEqual(new['text'][token['start_offset']:token['end_offset']],token['text'])
+            new_id=report['changes'][0]['new_verse_id']
+            annotation=db.execute("SELECT * FROM bible_annotations WHERE id='mark'").fetchone()
+            self.assertEqual((annotation['verse_id'],annotation['start_offset'],annotation['end_offset'],annotation['selected_text'],annotation['note']),
+                             (new_id,6,10,'Beta','Keep my note'))
+            joined=db.execute("SELECT selected_text,note FROM bible_annotations WHERE id='joined'").fetchone()
+            self.assertEqual(tuple(joined),('Alpha Beta','Keep this private text'))
+            self.assertEqual(tuple(db.execute("SELECT verse_id,character_offset,label FROM bible_bookmarks").fetchone()),(new_id,6,'My label'))
+            self.assertEqual(db.execute('SELECT verse_id FROM bible_navigation_history').fetchone()[0],new_id)
+            self.assertEqual(db.execute('SELECT character_offset FROM bible_reader_state').fetchone()[0],6)
+            self.assertEqual(tuple(db.execute('SELECT start_offset,end_offset FROM bible_red_letter_spans WHERE verse_id=?',(new_id,)).fetchone()),(0,10))
+            self.assertEqual(db.execute('SELECT topic_id FROM bible_chain_verses WHERE verse_id=?',(new_id,)).fetchone()[0],1)
+            self.assertIsNone(db.execute('PRAGMA foreign_key_check').fetchone())
+        with closing(sqlite3.connect(report['backup'])) as db:
+            self.assertEqual(db.execute('SELECT text FROM bible_verses WHERE id=1').fetchone()[0],'AlphaBeta gamma.')
+
+    def test_letters_punctuation_and_existing_whitespace_cannot_be_changed(self):
+        for after in ('Alpha Beta delta.','Alpha Beta gamma!','AlphaBeta gamma.','AlphaBeta\ngamma.'):
+            plan=copy.deepcopy(self.plan);plan['changes'][0]['after']=after
+            before=self.path.read_bytes()
+            with self.assertRaises(self.study.SyncError):self.study.repair_bible_spacing(self.path,plan)
+            self.assertEqual(self.path.read_bytes(),before)
+
+    def test_stale_source_or_verse_rolls_back_every_correction(self):
+        for alteration in ('source','verse'):
+            plan=copy.deepcopy(self.plan)
+            if alteration=='source':plan['source_hashes']['NIV']='f'*64
+            else:plan['changes'][-1]['before']='Different original words'
+            before=self.path.read_bytes()
+            with self.assertRaises(self.study.SyncError):self.study.repair_bible_spacing(self.path,plan)
+            self.assertEqual(self.path.read_bytes(),before)
+
+    def test_reapplying_reviewed_plan_is_idempotent(self):
+        self.study.repair_bible_spacing(self.path,self.plan)
+        again=self.study.repair_bible_spacing(self.path,self.plan)
+        self.assertEqual(again['status'],'unchanged')
+        self.assertEqual(again['already_fixed'],3)
+        self.assertFalse(again['changes'])
+
+    def test_corrupt_saved_selection_is_retained_instead_of_misplaced(self):
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE bible_annotations SET selected_text='Original quotation' WHERE id='mark'")
+        report=self.study.repair_bible_spacing(self.path,self.plan)
+        self.assertEqual(report['anchors']['deferred'],1)
+        with closing(sqlite3.connect(self.path)) as db, db:
+            self.assertEqual(tuple(db.execute("SELECT verse_id,selected_text,note FROM bible_annotations WHERE id='mark'").fetchone()),(1,'Original quotation','Keep my note'))
+
+
+    def compact_update(self, plan=None):
+        plan = plan or self.plan
+        update = dict(schema_version=1, source_hashes=plan['source_hashes'], changes=[], scanned=plan['scanned'])
+        for change in plan['changes']:
+            left, right, _ = self.study._spacing_offset_maps(change['before'], change['after'])
+            update['changes'].append(dict(translation=change['translation'], book_id=change['book_id'],
+                chapter=change['chapter'], verse=change['verse'],
+                before_sha256=hashlib.sha256(change['before'].encode()).hexdigest(),
+                after_sha256=hashlib.sha256(change['after'].encode()).hexdigest(),
+                insertions=[i for i in range(len(left)) if right[i] != left[i]]))
+        path=self.path.parent/'spacing.json'
+        path.write_text(json.dumps(update),encoding='utf-8')
+        return path, file_hash(path), update
+
+    def test_compact_bundle_maps_saved_data_and_runs_only_once(self):
+        from offline_app import apply_bundled_spacing_update
+        path,digest,_=self.compact_update()
+        with patch('requests.post',side_effect=AssertionError('Spacing repair must work offline')):
+            report=apply_bundled_spacing_update(self.study,self.path,path,digest)
+        self.assertEqual(report['anchors']['annotations'],2)
+        self.assertEqual(report['anchors']['bookmarks'],1)
+        self.assertEqual(len(report['changes']),3)
+        self.assertTrue(Path(report['backup']).is_file())
+        with patch.object(self.study,'repair_bible_spacing',side_effect=AssertionError('Update repeated')):
+            self.assertEqual(apply_bundled_spacing_update(self.study,self.path,path,digest)['status'],'unchanged')
+        with closing(sqlite3.connect(self.path)) as db, db:
+            self.assertEqual(db.execute("SELECT selected_text,note FROM bible_annotations WHERE id='joined'").fetchone(),
+                             ('Alpha Beta','Keep this private text'))
+
+    def test_compact_bundle_rejects_unverified_changes_without_writes(self):
+        from offline_app import apply_bundled_spacing_update
+        path,digest,original=self.compact_update()
+        for variant in ('bundle_hash','source_hash','verse_hash','after_hash','offset','duplicate'):
+            update=copy.deepcopy(original)
+            if variant=='source_hash':update['source_hashes']['NIV']='f'*64
+            elif variant=='verse_hash':update['changes'][-1]['before_sha256']='f'*64
+            elif variant=='after_hash':update['changes'][-1]['after_sha256']='f'*64
+            elif variant=='offset':update['changes'][-1]['insertions']=[-1]
+            elif variant=='duplicate':update['changes'].append(update['changes'][0])
+            path.write_text(json.dumps(update),encoding='utf-8')
+            before=self.path.read_bytes()
+            with self.subTest(variant=variant),self.assertRaises(ValueError):
+                apply_bundled_spacing_update(self.study,self.path,path,'f'*64 if variant=='bundle_hash' else file_hash(path))
+            self.assertEqual(self.path.read_bytes(),before)
+            self.assertFalse((self.path.parent/'backups').exists())
+
+    def test_compact_bundle_recovers_after_repair_committed_before_marker(self):
+        from offline_app import apply_bundled_spacing_update
+        path,digest,_=self.compact_update()
+        self.study.repair_bible_spacing(self.path,self.plan)
+        with patch.object(self.study,'repair_bible_spacing',side_effect=AssertionError('Already corrected text reapplied')):
+            self.assertEqual(apply_bundled_spacing_update(self.study,self.path,path,digest)['status'],'unchanged')
+        with closing(sqlite3.connect(self.path)) as db, db:
+            self.assertEqual(db.execute("SELECT value FROM bible_metadata WHERE key='bundled_spacing_update'").fetchone()[0],digest)
+            self.assertEqual(db.execute('SELECT count(*) FROM bible_verses').fetchone()[0],6)
+
+    def test_existing_installation_updates_during_startup(self):
+        path,digest,_=self.compact_update()
+        root=self.path.parent/'existing-device'
+        (root/'study').mkdir(parents=True)
+        target=root/'study/bible_study.db';shutil.copyfile(self.path,target)
+        manifest=self.path.parent/'manifest.json'
+        manifest.write_text(json.dumps(dict(resource_version='test',files=[],resource_bytes=0,
+            bible_spacing_update=dict(file=path.name,sha256=digest))))
+        app=create_app(root,path.parent,manifest,gate='test-gate',bridge_factory=FakeBridge)
+        with closing(sqlite3.connect(target)) as db:
+            self.assertEqual(db.execute('SELECT text FROM bible_verses WHERE is_active=1').fetchall(),[('Alpha Beta gamma.',)]*3)
+        with patch.object(self.study,'repair_bible_spacing',side_effect=AssertionError('Startup reapplied repair')):
+            create_app(root,path.parent,manifest,gate='test-gate',bridge_factory=FakeBridge)
+        self.assertFalse(FakeBridge.calls)
+
+    def test_fresh_setup_repairs_and_retries_without_replacing_reader(self):
+        path,digest,_=self.compact_update()
+        root=self.path.parent/'new-device'
+        manifest=self.path.parent/'manifest.json'
+        manifest.write_text(json.dumps(dict(resource_version='test',files=[],resource_bytes=0,
+            bible_spacing_update=dict(file=path.name,sha256=digest))))
+        class Native:
+            copies=0
+            def readSession(native):return json.dumps(PROFILE)
+            def writeSession(native,value):pass
+            def requiredSetupBytes(native):return 0
+            def resourceProgress(native):return '{}'
+            def installResources(native):
+                native.copies+=1
+                destination=root/'study/bible_study.db';destination.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(self.path,destination)
+        native=Native()
+        app=create_app(root,path.parent,manifest,native=native,gate='test-gate',bridge_factory=FakeBridge)
+        app.device_state.save_setting(agreement=TERMS_VERSION)
+        client=app.test_client();client.set_cookie('iowo_device_gate','test-gate');client.get('/mobile/setup/status')
+        with client.session_transaction() as identity:csrf=identity['bible_study_csrf']
+        save=app.device_state.save_setting
+        def interrupted_save(**values):
+            if values.get('resources_ready'):raise OSError('Simulated interruption after the repair commit')
+            return save(**values)
+        def prepare():
+            result=client.post('/mobile/setup',json={},headers={'X-CSRF-Token':csrf})
+            self.assertEqual(result.status_code,200,result.data)
+            for _ in range(1000):
+                state=client.get('/mobile/setup/status').get_json()
+                if not state['running']:return state
+                time.sleep(.01)
+            self.fail('Fixture setup did not complete')
+        with patch.object(app.device_state,'save_setting',side_effect=interrupted_save):
+            first=prepare()
+        self.assertFalse(first['ready']);self.assertIn('Simulated interruption',first['error'])
+        self.assertEqual(app.device_state.settings['spacing_setup_pending'],digest)
+        second=prepare();self.assertTrue(second['ready'],second)
+        self.assertEqual(native.copies,1)
+        with closing(sqlite3.connect(root/'study/bible_study.db')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM bible_verses').fetchone()[0],6)
+            self.assertEqual(db.execute("SELECT note FROM bible_annotations WHERE id='joined'").fetchone()[0],'Keep this private text')
 
 if __name__ == '__main__': unittest.main(verbosity=2)

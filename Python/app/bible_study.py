@@ -1229,7 +1229,8 @@ def parse_thompson_pdf(data, progress=None):
                         for glyph in _thompson_glyphs(page):
                             char=glyph['char']
                             if char.isspace():
-                                if runs and kind:
+                                if runs:
+                                    # Preserve the source separator after filtered reference glyphs.
                                     runs[-1][1].append((char,runs[-1][1][-1][1]))
                                 continue
                             font,size=glyph['font'],glyph['size']
@@ -3142,7 +3143,9 @@ def _library_sources(database_path):
 
 def _usfm_plain(text):
     text = re.sub(r'\\ref\s+([^|\\]+)(?:\|[^\\]*)?\\ref\*', r'\1', text)
-    text = re.sub(r'\\[+a-zA-Z][a-zA-Z0-9-]*\*?[ \t]*', '', text)
+    # Closing formatting markers do not own the following word separator.
+    text = re.sub(r'\\[+a-zA-Z][a-zA-Z0-9-]*\*', '', text)
+    text = re.sub(r'\\[+a-zA-Z][a-zA-Z0-9-]*[ \t]*', '', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return re.sub(r'\n\s*\n+', '\n', text).strip()
 
@@ -3288,6 +3291,159 @@ def import_usfm_translations(database_path, archives, *, sources=None, progress=
             raise SyncError('Translation publication failed validation; the recovery backup was kept.')
     return dict(status='completed',counts=counts,backup=str(backup) if backup else None,
                 message='Cebuano/Tagalog translations imported into Bible Study only.')
+
+
+def _spacing_offset_maps(before, after):
+    """Map code-point boundaries only when the sole change is inserting ASCII spaces."""
+    left, right, position, added = [], [], 0, 0
+    for index in range(len(before) + 1):
+        left.append(position)
+        while position < len(after) and after[position] == ' ' and (index == len(before) or before[index] != ' '):
+            position += 1; added += 1
+        right.append(position)
+        if index < len(before):
+            if position >= len(after) or before[index] != after[position]:
+                raise SyncError('A spacing repair would change letters, punctuation, or existing whitespace.')
+            position += 1
+    if position != len(after) or not added:
+        raise SyncError('Expected a correction consisting only of inserted spaces.')
+    return left, right, added
+
+def _apply_spacing_plan(conn, plan):
+    conn.row_factory = sqlite3.Row
+    if plan.get('schema_version') != 1:
+        raise SyncError('Unsupported spacing repair plan format.')
+    if conn.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID:
+        raise SyncError('Spacing repair requires a recognized Bible Study database.')
+    editions = {}
+    for translation, digest in plan['source_hashes'].items():
+        if translation not in READER_TRANSLATIONS:
+            raise SyncError('Unsupported Bible spacing repair translation.')
+        row = conn.execute('''SELECT e.id,s.sha256 FROM bible_editions e JOIN bible_sources s ON s.id=e.source_id
+            WHERE e.translation=? AND e.is_active=1 AND e.status='ready' ''', (translation,)).fetchone()
+        if not row or row['sha256'] != digest:
+            raise SyncError('The repair source does not match the active Bible edition.')
+        editions[translation] = row['id']
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    counts = {kind: dict(verses_changed=0, spaces_added=0) for kind in editions}
+    anchors = dict(annotations=0, bookmarks=0, history=0, reader_positions=0, deferred=0)
+    seen, applied, already_fixed = set(), [], 0
+    now = datetime.now(timezone.utc).isoformat()
+    active_before = conn.execute('SELECT COUNT(*) FROM bible_verses WHERE is_active=1').fetchone()[0]
+    for change in plan['changes']:
+        kind = change['translation']
+        if kind not in editions or change['source_sha256'] != plan['source_hashes'][kind]:
+            raise SyncError('Missing or mismatched source proof in the repair plan.')
+        reference = (kind, change['book_id'], change['chapter'], change['verse'])
+        if reference in seen:
+            raise SyncError('A repair plan repeats a verse.')
+        seen.add(reference)
+        left, right, added = _spacing_offset_maps(change['before'], change['after'])
+        row = conn.execute('''SELECT * FROM bible_verses WHERE edition_id=? AND book_id=? AND chapter=?
+            AND verse=? AND is_active=1''', (editions[kind], *reference[1:])).fetchone()
+        if row and row['text'] == change['after']:
+            already_fixed += 1; continue
+        if (not row or row['id'] != change['verse_id'] or row['text'] != change['before']
+                or row['content_hash'] != hashlib.sha256(change['before'].encode()).hexdigest()):
+            raise SyncError('The active verse changed since the plan was reviewed. Regenerate the plan.')
+        revision = conn.execute('''SELECT MAX(revision)+1 FROM bible_verses
+            WHERE edition_id=? AND book_id=? AND chapter=? AND verse=?''', (editions[kind], *reference[1:])).fetchone()[0]
+        conn.execute('UPDATE bible_verses SET is_active=0 WHERE id=?', (row['id'],))
+        new_id = conn.execute('''INSERT INTO bible_verses
+            (edition_id,book_id,chapter,verse,text,heading,content_hash,verse_end,notes_json,layout,revision)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (editions[kind], *reference[1:], change['after'], row['heading'],
+                hashlib.sha256(change['after'].encode()).hexdigest(), row['verse_end'], row['notes_json'], row['layout'], revision)).lastrowid
+        pattern = r"\w+(?:['’]\w+)*" if kind == 'NIV' else r"[^\W\d_]+(?:['’ʼ-][^\W\d_]+)*"
+        conn.executemany('''INSERT INTO bible_tokens(verse_id,token_index,start_offset,end_offset,text,normalized_text)
+            VALUES(?,?,?,?,?,?)''', ((new_id, index, match.start(), match.end(), match[0],
+                unicodedata.normalize('NFKC', match[0]).casefold()) for index, match in enumerate(re.finditer(pattern, change['after'], re.UNICODE))))
+        # Keep old text/tokens/evidence as an immutable prior revision. Source-level
+        # links retain their exact references; no inferred Strong's alignment is copied.
+        for span in conn.execute('SELECT * FROM bible_red_letter_spans WHERE verse_id=?', (row['id'],)).fetchall():
+            start, end = right[span['start_offset']], left[span['end_offset']]
+            if start < end:
+                conn.execute('''INSERT INTO bible_red_letter_spans
+                    (verse_id,start_offset,end_offset,speaker,evidence_source_id,evidence_locator) VALUES(?,?,?,?,?,?)''',
+                    (new_id, start, end, span['speaker'], span['evidence_source_id'], span['evidence_locator']))
+        if 'bible_chain_verses' in tables:
+            conn.execute('INSERT INTO bible_chain_verses SELECT ?,topic_id FROM bible_chain_verses WHERE verse_id=?', (new_id, row['id']))
+        for annotation in conn.execute('SELECT * FROM bible_annotations WHERE verse_id=?', (row['id'],)).fetchall():
+            start, end = annotation['start_offset'], annotation['end_offset']
+            if (not 0 <= start <= end <= len(row['text'])
+                    or annotation['selected_text'] != row['text'][start:end]):
+                anchors['deferred'] += 1; continue
+            new_start = right[start]
+            new_end = left[end] if end > start else new_start
+            conn.execute('''UPDATE bible_annotations SET verse_id=?,start_offset=?,end_offset=?,selected_text=?,
+                version=version+1,updated_at=? WHERE id=?''',
+                (new_id, new_start, new_end, change['after'][new_start:new_end], now, annotation['id']))
+            anchors['annotations'] += 1
+        for bookmark in conn.execute('SELECT * FROM bible_bookmarks WHERE verse_id=?', (row['id'],)).fetchall():
+            offset = bookmark['character_offset']
+            if not 0 <= offset <= len(row['text']):
+                anchors['deferred'] += 1; continue
+            conn.execute('UPDATE bible_bookmarks SET verse_id=?,character_offset=? WHERE id=?', (new_id, right[offset], bookmark['id']))
+            anchors['bookmarks'] += 1
+        if 'bible_navigation_history' in tables:
+            anchors['history'] += conn.execute('UPDATE bible_navigation_history SET verse_id=? WHERE verse_id=?', (new_id,row['id'])).rowcount
+        for saved in conn.execute('''SELECT user_key,character_offset FROM bible_reader_state
+            WHERE (edition_id=? OR (edition_id IS NULL AND ?='NIV')) AND book_id=? AND chapter=? AND verse=?''',
+            (editions[kind], kind, *reference[1:])).fetchall():
+            offset = saved['character_offset']
+            if 0 <= offset <= len(row['text']) and right[offset] != offset:
+                conn.execute('''UPDATE bible_reader_state SET character_offset=?,version=version+1,updated_at=?
+                    WHERE user_key=?''', (right[offset], now, saved['user_key']))
+                anchors['reader_positions'] += 1
+        counts[kind]['verses_changed'] += 1; counts[kind]['spaces_added'] += added
+        applied.append(dict(change, spaces_added=added, new_verse_id=new_id, new_revision=revision))
+    if conn.execute('SELECT COUNT(*) FROM bible_verses WHERE is_active=1').fetchone()[0] != active_before:
+        raise SyncError('Spacing repair changed the active verse count.')
+    if conn.execute('PRAGMA foreign_key_check').fetchone():
+        raise SyncError('Spacing repair failed foreign-key validation.')
+    return dict(translations=counts, anchors=anchors, already_fixed=already_fixed, changes=applied,
+                scanned=plan.get('scanned', {}), skipped=plan.get('skipped', []))
+
+def repair_bible_spacing(database_path, plan, *, dry_run=False, backup_directory=None):
+    """Explicit operator maintenance for a source-verified space-insertion plan.
+
+    Validate on a private SQLite snapshot, then back up and apply atomically.
+    Preserve original verse revisions and deterministically map personal anchors.
+    This function is never invoked by an ordinary page request or by Pij.
+    """
+    path = _database_path(database_path).resolve(strict=True)
+    lock = _sync_lock(path, create=True)
+    if lock is None:
+        raise SyncError('Bible Study is already being synchronized. Retry after it finishes.')
+    try:
+        with tempfile.TemporaryDirectory(prefix='bible_spacing_') as directory:
+            staged = Path(directory)/'validation.db'
+            with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as source, closing(sqlite3.connect(staged)) as target:
+                source.backup(target)
+            with closing(sqlite3.connect(staged)) as conn, conn:
+                conn.execute('PRAGMA foreign_keys=ON')
+                preview = _apply_spacing_plan(conn, plan)
+                if conn.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                    raise SyncError('Spacing repair failed snapshot integrity validation.')
+        if dry_run:
+            return dict(preview, status='validated', backup=None)
+        if not preview['changes']:
+            return dict(preview, status='unchanged', backup=None)
+        directory = Path(backup_directory or path.parent/'backups')
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        backup = directory/('before_spacing_'+datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_')+secrets.token_hex(3)+'.db')
+        backup.touch(mode=0o600, exist_ok=False)
+        with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as source, closing(sqlite3.connect(backup)) as target:
+            source.backup(target)
+            if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise SyncError('Spacing repair backup verification failed.')
+        with closing(sqlite3.connect(path.as_uri()+'?mode=rw', uri=True, timeout=30)) as conn, conn:
+            conn.execute('PRAGMA foreign_keys=ON'); conn.execute('BEGIN IMMEDIATE')
+            report = _apply_spacing_plan(conn, plan)
+            summary = dict(translations=report['translations'], anchors=report['anchors'], applied_at=datetime.now(timezone.utc).isoformat())
+            conn.execute('INSERT OR REPLACE INTO bible_metadata(key,value) VALUES(?,?)', ('source_verified_spacing_repair', json.dumps(summary)))
+        return dict(report, status='completed', backup=str(backup))
+    finally:
+        _release_sync_lock(lock)
 
 
 def sync_translation_sources(path, folder_id, progress, *, drive=None, fetch=None):

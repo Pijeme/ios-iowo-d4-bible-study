@@ -1,6 +1,6 @@
 # IOWO D4 Bible Study for iPhone and iPad
 
-This is a standalone iOS source port of the local Android app, version 1.0.3.
+This is a standalone iOS source port of the local Android app, version 1.0.4 (5).
 It includes an Xcode project, native Swift/Objective-C host, embedded Apple
 Python runtime, the shared offline study engine, the existing HTML/CSS/JS
 interface, tutorials, and all 32 offline resource files.
@@ -136,3 +136,28 @@ References: [Python on iOS](https://docs.python.org/3.13/using/ios.html),
 [Apple simulator setup](https://developer.apple.com/documentation/safari-developer-tools/installing-xcode-and-simulators).
 
 Startup revision: the original rounded help buttons and full-frame artwork are restored. During preparation, a loading bar and 30 rotating study verses are shown. After readiness, they hide and the artwork appears alone for three visible seconds before the reader opens; help/backgrounding delays this interval until the splash is visible again.
+
+## Bible spacing update, 15 November 2026
+
+Version 1.0.4 (5) includes the website spacing fixes from commit `6859a40`.
+The original NIV PDF and Biblica USFM archives were checked against the active
+source SHA-256 hashes, then all 92,507 verse entries were parsed and compared.
+Only missing ASCII spaces differed: 1,936 NIV verses (2,160 spaces), 3,662
+Cebuano verses (3,985 spaces), and 3,080 Tagalog verses (3,350 spaces).
+No letters, punctuation, existing spaces, or personal writing are replaced.
+
+`runtime/bible-spacing-20261115.json` contains source hashes, verse hashes and
+insertion offsets. Both apps ship the identical verified update. It applies
+automatically after initial resource setup and before an existing reader starts.
+A verified private recovery backup is made before applying changes. Earlier
+verse revisions remain available, and valid highlights, bookmarks, reading
+positions, red-letter spans and chain links are mapped to the corrected text.
+Unverifiable saved selections remain attached to their original verse revision.
+The update records a completion marker and safely resumes after interruption.
+Allow temporary free storage for validation and a backup of the reader database;
+the backup stays in the device's private `study/backups` directory.
+
+The original bundled database and its resource hashes are retained so existing
+APK/library restore archives continue to work. The installed writable reader
+receives the corrections; do not overwrite it with a new reference database.
+The correction JSON uses LF endings so Git checkouts preserve its checksum.

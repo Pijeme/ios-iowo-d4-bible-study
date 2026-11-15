@@ -15,6 +15,9 @@ def verify():
         with path.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         assert digest == entry['sha256'] and path.stat().st_size == entry['bytes'], entry['path']
+    spacing = manifest['bible_spacing_update']
+    update = ROOT / 'Resources/runtime' / spacing['file']
+    assert hashlib.sha256(update.read_bytes()).hexdigest() == spacing['sha256'], spacing['file']
     packages = ROOT / 'Python/site-packages'
     bad = [p for p in packages.rglob('*') if p.suffix.lower() in ('.so', '.pyd', '.dll', '.dylib')]
     assert not bad, bad
@@ -139,7 +142,7 @@ def project():
                     'ONLY_ACTIVE_ARCH': 'YES' if mode == 'Debug' else 'NO'}
         config_groups['project'].append(add('project:'+mode, isa='XCBuildConfiguration', buildSettings=settings, name=mode))
         settings = {'PRODUCT_BUNDLE_IDENTIFIER': 'org.iowo.d4.biblestudy', 'PRODUCT_NAME': 'IOWOBibleStudy',
-                    'MARKETING_VERSION': '1.0.3', 'CURRENT_PROJECT_VERSION': '4', 'INFOPLIST_FILE': 'Sources/Info.plist',
+                    'MARKETING_VERSION': '1.0.4', 'CURRENT_PROJECT_VERSION': '5', 'INFOPLIST_FILE': 'Sources/Info.plist',
                     'SWIFT_OBJC_BRIDGING_HEADER': 'Sources/IOWOBibleStudy-Bridging-Header.h', 'ASSETCATALOG_COMPILER_APPICON_NAME': 'AppIcon',
                     'LD_RUNPATH_SEARCH_PATHS': ['$(inherited)', '@executable_path/Frameworks'],
                     'FRAMEWORK_SEARCH_PATHS': ['$(inherited)', '$(PROJECT_DIR)/Vendor', '$(BUILT_PRODUCTS_DIR)'],

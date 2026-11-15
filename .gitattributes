@@ -8,3 +8,4 @@
 *.png binary
 *.webp binary
 *.ttf binary
+Resources/runtime/bible-spacing-*.json text eol=lf

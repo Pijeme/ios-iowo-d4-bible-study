@@ -149,6 +149,81 @@ def file_hash(path):
     return value.hexdigest()
 
 
+def apply_bundled_spacing_update(core, database_path, update_path, expected_sha256):
+    """Apply verified insertion offsets once, before the reader starts serving.
+
+    The bundle contains hashes and offsets, never personal data or guessed text.
+    The website repair engine backs up the database and preserves saved anchors.
+    """
+    path = Path(database_path).resolve(strict=True)
+    payload = Path(update_path).read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if not hmac.compare_digest(digest, expected_sha256):
+        raise ValueError('The bundled Bible spacing update failed verification.')
+    update = json.loads(payload)
+    if update.get('schema_version') != 1 or set(update['source_hashes']) != {'NIV', 'CEBOCB', 'TCB'}:
+        raise ValueError('Unsupported Bible spacing update.')
+    with _maintenance_lock:
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            if db.execute('PRAGMA application_id').fetchone()[0] != core.APPLICATION_ID:
+                raise ValueError('The Bible spacing update requires a recognized reader database.')
+            marker = db.execute("SELECT value FROM bible_metadata WHERE key='bundled_spacing_update'").fetchone()
+            if marker and marker[0] == digest:
+                return dict(status='unchanged', changes=[])
+            editions = {}
+            for translation, source_hash in update['source_hashes'].items():
+                row = db.execute('''SELECT e.id,s.sha256 FROM bible_editions e
+                    JOIN bible_sources s ON s.id=e.source_id
+                    WHERE e.translation=? AND e.is_active=1 AND e.status='ready' ''', (translation,)).fetchone()
+                if not row or row['sha256'] != source_hash:
+                    raise ValueError('The spacing update does not match the installed Bible source.')
+                editions[translation] = row['id']
+            changes, seen = [], set()
+            for item in update['changes']:
+                translation = item['translation']
+                reference = (translation, item['book_id'], item['chapter'], item['verse'])
+                if reference in seen or translation not in editions:
+                    raise ValueError('Invalid or repeated Bible spacing reference.')
+                seen.add(reference)
+                row = db.execute('''SELECT id,text,content_hash FROM bible_verses
+                    WHERE edition_id=? AND book_id=? AND chapter=? AND verse=? AND is_active=1''',
+                    (editions[translation], *reference[1:])).fetchone()
+                if not row:
+                    raise ValueError('A verse required by the spacing update is missing.')
+                before = row['text']
+                current_hash = hashlib.sha256(before.encode()).hexdigest()
+                if current_hash != row['content_hash']:
+                    raise ValueError('The installed Bible verse failed verification.')
+                if current_hash == item['after_sha256']:
+                    continue
+                if current_hash != item['before_sha256']:
+                    raise ValueError('An installed verse differs from the verified spacing update.')
+                offsets = item['insertions']
+                if (not offsets or any(type(offset) is not int or not 0 < offset < len(before) for offset in offsets)
+                        or offsets != sorted(set(offsets))):
+                    raise ValueError('Invalid Bible spacing insertion offsets.')
+                pieces, start = [], 0
+                for offset in offsets:
+                    pieces.append(before[start:offset]); pieces.append(' '); start = offset
+                pieces.append(before[start:])
+                after = ''.join(pieces)
+                if hashlib.sha256(after.encode()).hexdigest() != item['after_sha256']:
+                    raise ValueError('The corrected Bible verse failed verification.')
+                core._spacing_offset_maps(before, after)
+                changes.append(dict(translation=translation, book_id=item['book_id'], chapter=item['chapter'],
+                    verse=item['verse'], verse_id=row['id'], before=before, after=after,
+                    source_sha256=update['source_hashes'][translation]))
+        plan = dict(schema_version=1, source_hashes=update['source_hashes'], changes=changes,
+                    scanned=update.get('scanned', {}))
+        report = core.repair_bible_spacing(path, plan) if changes else dict(status='unchanged', changes=[])
+        # If the process stopped after committing the repair, the next launch
+        # recognizes the after-hashes and records this marker without reapplying.
+        with closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True)) as db, db:
+            db.execute("INSERT OR REPLACE INTO bible_metadata(key,value) VALUES('bundled_spacing_update',?)", (digest,))
+        return report
+
+
 def create_app(data_dir, web_dir, manifest_path, native=None, gate=None, bridge_factory=WebsiteBridge):
     root, web = Path(data_dir).resolve(), Path(web_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -174,6 +249,18 @@ def create_app(data_dir, web_dir, manifest_path, native=None, gate=None, bridge_
     app._offline_owner = SimpleNamespace(DATABASE=app.config['DATABASE'], AI_DATABASE=app.config['AI_DATABASE'])
     core = load_core(app._offline_owner)
     core.BASE_DIR = web
+    spacing_update = manifest.get('bible_spacing_update')
+    def update_bible_spacing():
+        if spacing_update:
+            update_path = (web / spacing_update['file']).resolve()
+            if update_path.parent != web:
+                raise ValueError('Invalid bundled Bible spacing update location.')
+            apply_bundled_spacing_update(core, app.config['BIBLE_STUDY_DATABASE'],
+                                        update_path, spacing_update['sha256'])
+    # Existing installations already have a writable reader. Repair it before
+    # any requests or background note jobs can open it; never replace that file.
+    if Path(app.config['BIBLE_STUDY_DATABASE']).is_file():
+        update_bible_spacing()
     original_pdf = getattr(core.sermon_notes_pdf, '_offline_original', core.sermon_notes_pdf)
     if native:
         def native_pdf(note):
@@ -378,7 +465,10 @@ def create_app(data_dir, web_dir, manifest_path, native=None, gate=None, bridge_
 
     def install_resources():
         try:
-            if native:
+            pending_spacing = spacing_update and state.settings.get('spacing_setup_pending') == spacing_update['sha256']
+            if pending_spacing:
+                pass  # Resource copy finished before a previous repair/retry.
+            elif native:
                 native.installResources()
             else:
                 project = Path(manifest_path).resolve().parents[4]
@@ -394,7 +484,13 @@ def create_app(data_dir, web_dir, manifest_path, native=None, gate=None, bridge_
                     if file_hash(staging) != entry['sha256']: raise ValueError('A bundled resource could not be verified.')
                     staging.replace(destination)
                     state.setup.update(completed=i+1, total=len(manifest['files']), message='Preparing offline study resources')
-            state.save_setting(resources_ready=True, resource_version=manifest['resource_version'])
+            if spacing_update:
+                # A retry must not ask the native installer to overwrite or
+                # hash-match a reader that was already repaired in place.
+                state.save_setting(spacing_setup_pending=spacing_update['sha256'])
+                state.setup.update(message='Updating Bible spacing')
+                update_bible_spacing()
+            state.save_setting(resources_ready=True, resource_version=manifest['resource_version'], spacing_setup_pending='')
             state.setup.update(running=False, message='Your offline library is ready.')
         except Exception as error:
             state.setup.update(running=False, error=str(error), message='Setup did not finish. Your account and notes are safe; retry setup.')
@@ -420,11 +516,11 @@ def create_app(data_dir, web_dir, manifest_path, native=None, gate=None, bridge_
             except (ValueError, TypeError): pass
         return jsonify(ok=True, ready=bool(state.settings.get('resources_ready')), **progress)
 
-    core.register_bible_study_routes(app)
-    # Endpoints referenced by the unchanged Bible Study and icon templates.
-    app.add_url_rule('/start', 'splash', lambda: redirect(url_for('home')))
-    app.add_url_rule('/library', 'pastor_resources', lambda: redirect(url_for('bible_study.page')))
-
+    core.register_bible_study_routes(app)
+    # Endpoints referenced by the unchanged Bible Study and icon templates.
+    app.add_url_rule('/start', 'splash', lambda: redirect(url_for('home')))
+    app.add_url_rule('/library', 'pastor_resources', lambda: redirect(url_for('bible_study.page')))
+
     @app.get('/pastor-resources/my-library')
     def saved_library():
         if not state.profile or not state.settings.get('resources_ready'): return redirect(url_for('home'))

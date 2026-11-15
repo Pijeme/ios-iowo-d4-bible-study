@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "app_name": "IOWO D4 Bible Study",
-  "resource_version": "2026.11.08.1",
+  "resource_version": "2026.11.15.1",
   "files": [
     {
       "path": "study/bible_study.db",
@@ -202,5 +202,10 @@
   "includes_personal_notes": false,
   "caches_prepared": true,
   "source_commit": "bf5e725",
-  "final_android_installed_size": "Measure after the later APK/AAB build."
+  "final_android_installed_size": "Measure after the later APK/AAB build.",
+  "bible_spacing_update": {
+    "file": "bible-spacing-20261115.json",
+    "sha256": "caede70ea991157f240034b6405616b9e52cdde64d35d5efee88f7a4216cc090",
+    "website_commit": "6859a40aeb26b5eae01ec17732ed36e00cba261c"
+  }
 }
