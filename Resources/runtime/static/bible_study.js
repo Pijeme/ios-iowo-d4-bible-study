@@ -1871,22 +1871,125 @@
     element("Bible").addEventListener("scroll",()=>{if(notesActionsOpen)notesCloseActions();},{passive:true});
     window.addEventListener("resize",notesPositionActions);window.visualViewport?.addEventListener("resize",notesPositionActions);
     const notesTools=element("NotesTools");
-    let notesMenuOpen=false,notesToolbarPointerUntil=0;
+    const notesModeSwitch=element("NotesModeSwitch"),notesFormatMode=element("NotesFormatMode"),notesKeyboardMode=element("NotesKeyboardMode");
+    let notesMenuOpen=false,notesToolbarPointerUntil=0,notesSelecting=false,notesFormatting=false;
+    let notesToolPointer=null,notesToolPositionTimer=null;
+    let notesModePointer=null,notesModePositionTimer=null;
+    let notesTypingViewport=null,notesKeyboardClosing=null;
+    let notesTyping=false,notesUndoStack=[],notesRedoStack=[],notesEditingScroll=0,notesReadingScroll=0;
     root.dataset.notesMenu="selection";
-    const notesMainActions=notesTools.closest(".bs-notes-dock").querySelector(".bs-notes-actions");
-    const notesOriginalInputMode=notesEditor.getAttribute("inputmode");
+    // Keep selection tools outside the scrolling document, like the Bible tools.
+    // Showing or dismissing them must not move the words under the user's finger.
+    root.append(notesTools);
     function notesFormattingKeyboard(active){
-        if(active){notesEditor.setAttribute("inputmode","none");notesEditor.setAttribute("virtualkeyboardpolicy","manual");}
-        else {if(notesOriginalInputMode===null)notesEditor.removeAttribute("inputmode");else notesEditor.setAttribute("inputmode",notesOriginalInputMode);notesEditor.removeAttribute("virtualkeyboardpolicy");}
-        try {if(active)navigator.virtualKeyboard?.hide();window.IOWOAndroid?.setNotesFormatting?.(active);}catch(_){}
+        notesFormatting=active;
+        const suppress=active||!notesTyping;
+        notesEditor.setAttribute("inputmode",suppress?"none":"text");
+        if(suppress)notesEditor.setAttribute("virtualkeyboardpolicy","manual");else notesEditor.removeAttribute("virtualkeyboardpolicy");
+        try {if(suppress)navigator.virtualKeyboard?.hide();window.IOWOAndroid?.setNotesFormatting?.(suppress);}catch(_){}
+    }
+    function notesSetTyping(typing,{focus=false,close=true}={}){
+        const selection=window.getSelection(),current=selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode)?selection.getRangeAt(0).cloneRange():notesRange;
+        const wasFocused=document.activeElement===notesEditor,wasTyping=notesTyping;
+        const viewport=window.visualViewport;
+        if(typing&&current&&!current.collapsed)current.collapse(false);
+        notesTyping=!!typing&&!notesReadMode;
+        if(notesTyping&&!wasTyping){
+            notesKeyboardStillClosing();
+            notesTypingViewport=notesKeyboardClosing||{width:viewport?.width||innerWidth,height:viewport?.height||innerHeight,scale:viewport?.scale||1};
+            notesKeyboardClosing=null;
+        }
+        if(!notesTyping&&wasTyping){
+            if(touchNavigation()&&notesTypingViewport&&viewport&&Math.abs(viewport.width-notesTypingViewport.width)<50&&Math.abs(viewport.scale-notesTypingViewport.scale)<.05&&notesTypingViewport.height-viewport.height>120)notesKeyboardClosing=notesTypingViewport;
+            // Safari must receive blur while this is still an editable field.
+            // Refocusing it immediately afterward can keep its keyboard alive.
+            if(wasFocused)notesEditor.blur();
+        }
+        notesEditor.contentEditable=String(notesTyping);
+        notesEditor.setAttribute("aria-readonly",String(!notesTyping));
+        if(close)notesCloseMenu();else notesFormattingKeyboard(false);
+        if(!notesTyping&&wasTyping&&(wasFocused||document.activeElement===document.body)&&touchNavigation())element("NotesPanel").focus({preventScroll:true});
+        if((notesTyping&&(focus||wasFocused))||(!notesTyping&&wasTyping&&wasFocused&&!touchNavigation()))notesEditor.focus({preventScroll:true});
+        if(current&&notesEditor.contains(current.commonAncestorContainer)){
+            notesRange=current.cloneRange();notesRestoreNativeSelection();
+        }else if(focus){const range=document.createRange();range.selectNodeContents(notesEditor);range.collapse(false);selection.removeAllRanges();selection.addRange(range);notesRange=range;}
+        notesPaintFormattingSelection();
+        notesUpdateModeSwitch();
+    }
+    function notesUpdateModeSwitch(){
+        const visible=!notesReadMode&&readerTab==="notes"&&!element("NotesPanel").hidden&&!element("NotesWorkspace").hidden;
+        notesModeSwitch.hidden=!visible;
+        notesFormatMode.setAttribute("aria-pressed",String(!notesTyping));notesKeyboardMode.setAttribute("aria-pressed",String(notesTyping));
+        notesKeyboardMode.disabled=notesReadMode;
+        notesKeyboardMode.title=notesReadMode?"Return to editing to use the keyboard":"Type in your notes";
+        root.style.setProperty("--bs-notes-mode-space",visible?"60px":"0px");
+        notesPositionModeSwitch();
+    }
+    function notesPositionModeSwitch(){
+        if(notesModeSwitch.hidden||notesModePointer!==null)return;
+        const viewport=window.visualViewport,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+        const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight;
+        notesModeSwitch.style.left=(left+width/2)+"px";
+        notesModeSwitch.style.top=Math.max(top+6,top+height-notesModeSwitch.getBoundingClientRect().height-8)+"px";
+    }
+    notesModeSwitch.addEventListener("pointerdown",event=>{
+        if(!event.target.closest("button:not([disabled])"))return;
+        clearTimeout(notesModePositionTimer);notesModePointer=event.pointerId;
+        const selection=window.getSelection();
+        if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode))notesRange=selection.getRangeAt(0).cloneRange();
+    });
+    for(const type of ["pointerup","pointercancel"])document.addEventListener(type,event=>{
+        if(event.pointerId!==notesModePointer)return;
+        clearTimeout(notesModePositionTimer);
+        notesModePositionTimer=setTimeout(()=>{notesModePointer=null;notesPositionModeSwitch();},250);
+    },true);
+    notesModeSwitch.addEventListener("click",event=>{
+        const button=event.target.closest("button:not([disabled])");if(!button)return;
+        const typing=button===notesKeyboardMode;notesSetTyping(typing,{focus:typing});
+        if(!typing)notesShowSelectionTools();
+        clearTimeout(notesModePositionTimer);notesModePointer=null;requestAnimationFrame(()=>{notesPositionModeSwitch();notesPositionTools();});
+    });
+    function notesRestoreNativeSelection(){
+        if(!notesRange||!notesEditor.contains(notesRange.commonAncestorContainer))return;
+        const selection=window.getSelection(),current=selection?.rangeCount?selection.getRangeAt(0):null;
+        if(current&&current.startContainer===notesRange.startContainer&&current.startOffset===notesRange.startOffset&&current.endContainer===notesRange.endContainer&&current.endOffset===notesRange.endOffset)return;
+        selection.removeAllRanges();selection.addRange(notesRange.cloneRange());
+    }
+    function notesKeyboardStillClosing(){
+        if(!notesKeyboardClosing)return false;
+        const viewport=window.visualViewport;
+        if(!viewport||Math.abs(viewport.width-notesKeyboardClosing.width)>=50||Math.abs(viewport.scale-notesKeyboardClosing.scale)>=.05||viewport.height>=notesKeyboardClosing.height-80){notesKeyboardClosing=null;return false;}
+        return true;
     }
     function notesPaintFormattingSelection(){
         if(!window.CSS?.highlights||typeof window.Highlight!=="function")return;
-        if(notesMenuOpen&&notesRange&&!notesRange.collapsed&&notesEditor.contains(notesRange.commonAncestorContainer))CSS.highlights.set("sermon-format-selection",new Highlight(notesRange));
+        if((notesKeyboardClosing||(notesFormatting&&notesMenuOpen))&&notesRange&&!notesRange.collapsed&&notesEditor.contains(notesRange.commonAncestorContainer))CSS.highlights.set("sermon-format-selection",new Highlight(notesRange));
         else CSS.highlights.delete("sermon-format-selection");
     }
+    function notesPositionTools(){
+        if(!notesMenuOpen||notesToolPointer!==null)return;
+        const wasClosing=!!notesKeyboardClosing;
+        if(notesKeyboardStillClosing()){notesTools.hidden=true;root.style.setProperty("--bs-notes-tools-clearance","0px");return;}
+        if(wasClosing)notesRestoreNativeSelection();
+        notesPaintFormattingSelection();notesTools.hidden=false;
+        const viewport=window.visualViewport,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+        const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight,modeSpace=notesModeSwitch.hidden?0:60;
+        notesTools.style.width=Math.max(1,Math.min(640,width-12))+"px";
+        notesTools.style.maxHeight=Math.max(1,height-16-modeSpace)+"px";
+        const bounds=notesTools.getBoundingClientRect();
+        root.style.setProperty("--bs-notes-tools-clearance",notesReadMode?Math.ceil(bounds.height+8)+"px":"0px");
+        notesTools.style.left=(left+Math.max(6,(width-bounds.width)/2))+"px";
+        notesTools.style.top=Math.max(top+8,top+height-bounds.height-8-modeSpace)+"px";
+    }
+    window.addEventListener("resize",notesPositionTools);
+    window.visualViewport?.addEventListener("resize",notesPositionTools);
+    window.visualViewport?.addEventListener("scroll",notesPositionTools);
+    window.addEventListener("resize",notesPositionModeSwitch);
+    window.visualViewport?.addEventListener("resize",notesPositionModeSwitch);
+    window.visualViewport?.addEventListener("scroll",notesPositionModeSwitch);
     function notesParkFormattingFocus(preferred){
         if(!notesMenuOpen)return;
+        notesFormattingKeyboard(true);
         const selection=window.getSelection();
         if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode))notesRange=selection.getRangeAt(0).cloneRange();
         notesPaintFormattingSelection();
@@ -1903,21 +2006,42 @@
         control.value=key;
     }
     function notesCloseMenu(){
+        root.style.setProperty("--bs-notes-tools-clearance","0px");
+        clearTimeout(notesToolPositionTimer);notesToolPointer=null;
         notesMenuOpen=false;notesTools.removeAttribute("data-open");
-        notesTools.hidden=true;notesMainActions.hidden=false;
+        notesTools.hidden=true;
         notesFormattingKeyboard(false);notesPaintFormattingSelection();
     }
     function notesShowSelectionTools(){
-        if(notesReadMode||element("NotesPanel").hidden||element("NotesWorkspace").hidden)return notesCloseMenu();
+        if(notesTyping||element("NotesPanel").hidden||element("NotesWorkspace").hidden)return notesCloseMenu();
         const selection=window.getSelection();
         if(!selection?.rangeCount||selection.isCollapsed||!selection.toString().trim()||!notesEditor.contains(selection.anchorNode)||!notesEditor.contains(selection.focusNode))return;
         notesRange=selection.getRangeAt(0).cloneRange();notesCloseActions();
         if(!notesMenuOpen){
-            notesMenuOpen=true;notesMainActions.hidden=true;notesTools.hidden=false;notesTools.dataset.open="true";
-            notesFormattingKeyboard(true);notesParkFormattingFocus();
+            notesMenuOpen=true;notesTools.dataset.open="true";
         }
+        notesPositionTools();
+        element("NotesUndo").disabled=!notesUndoStack.length||(notesReadMode&&!notesUndoStack.at(-1).read);
     }
-    notesTools.addEventListener("pointerdown",()=>{notesToolbarPointerUntil=performance.now()+1000;},{passive:true});
+    notesTools.addEventListener("pointerdown",event=>{
+        const control=event.target.closest("button,select,input");if(!control)return;
+        clearTimeout(notesToolPositionTimer);notesToolPointer=event.pointerId;
+        notesToolbarPointerUntil=performance.now()+1000;
+        const selection=window.getSelection();
+        if(selection?.rangeCount&&!selection.isCollapsed&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode))notesRange=selection.getRangeAt(0).cloneRange();
+        // Park focus only after the user chooses a formatting control. Keep the
+        // control still until its click, even while the keyboard is closing.
+        notesParkFormattingFocus(control);
+    },{passive:true});
+    for(const type of ["pointerup","pointercancel"])document.addEventListener(type,event=>{
+        if(event.pointerId!==notesToolPointer)return;
+        clearTimeout(notesToolPositionTimer);
+        notesToolPositionTimer=setTimeout(()=>{notesToolPointer=null;notesPositionTools();},250);
+    },true);
+    notesTools.addEventListener("click",()=>{
+        clearTimeout(notesToolPositionTimer);notesToolPointer=null;requestAnimationFrame(notesPositionTools);
+    });
+    notesTools.addEventListener("focusin",()=>{notesFormattingKeyboard(true);notesPaintFormattingSelection();notesEditor.blur();});
     // Keep the editor's native range and formatting/save functions.
     notesTools.addEventListener("mousedown",event=>{if(event.target.closest("button"))event.preventDefault();});
     notesTools.addEventListener("click",event=>{
@@ -1930,19 +2054,34 @@
         const text=notesRange?.toString();if(text)await copyScripture(text,"Sermon Notes");
         notesParkFormattingFocus(element("NotesCopySelection"));
     });
-    element("NotesDismissSelection").addEventListener("click",notesCloseMenu);
+    function notesDismissSelection(){
+        const selection=window.getSelection();
+        if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode))selection.collapseToEnd();
+        notesCloseMenu();
+    }
+    element("NotesDismissSelection").addEventListener("click",notesDismissSelection);
     element("NotesErase").addEventListener("click",()=>{
         if(!notesActive||notesReadMode||!notesRange||notesRange.collapsed||!notesEditor.contains(notesRange.commonAncestorContainer))return;
         notesFormat("delete");
     });
-    notesEditor.addEventListener("pointerdown",()=>{if(notesMenuOpen)notesCloseMenu();},true);
-    document.addEventListener("pointerdown",event=>{
-        if(notesMenuOpen&&!notesTools.contains(event.target)&&!notesEditor.contains(event.target))notesCloseMenu();
+    notesEditor.addEventListener("pointerdown",event=>{
+        if(!event.isPrimary||event.button!==0)return;
+        notesSelecting=true;notesFormattingKeyboard(false);notesPaintFormattingSelection();
     },true);
-    document.addEventListener("keydown",event=>{if(event.key==="Escape"&&notesMenuOpen){event.preventDefault();event.stopPropagation();notesCloseMenu();}},true);
+    for(const type of ["pointerup","pointercancel"])document.addEventListener(type,()=>{
+        if(!notesSelecting)return;notesSelecting=false;notesShowSelectionTools();
+    },true);
+    notesEditor.addEventListener("contextmenu",()=>{
+        notesSelecting=false;notesShowSelectionTools();
+    });
+    document.addEventListener("pointerdown",event=>{
+        if(notesMenuOpen&&!notesTools.contains(event.target)&&!notesModeSwitch.contains(event.target)&&!notesEditor.contains(event.target))notesCloseMenu();
+    },true);
+    document.addEventListener("keydown",event=>{if(event.key==="Escape"&&notesMenuOpen){event.preventDefault();event.stopPropagation();notesDismissSelection();}},true);
     const notesMenuVisibility=new MutationObserver(()=>{
         if(element("NotesPanel").hidden||element("NotesWorkspace").hidden)notesCloseMenu();
         if(element("NotesPanel").hidden)notesCloseActions();
+        notesUpdateModeSwitch();
         positionWorkspaceTools();
         if(!element("NotesLibrary").hidden)element("NotesAll").setAttribute("aria-current","page");
         else element("NotesAll").removeAttribute("aria-current");
@@ -2031,6 +2170,111 @@
         if(!p.textContent)p.append(document.createElement("br"));
         return p;
     }
+    // Formatting uses the saved run model, never a focused editable element.
+    // This keeps Safari's keyboard closed and gives typing/formatting one Undo stack.
+    function notesLeafBlocks(){
+        const leaves=[];
+        function collect(child){
+            if(child.nodeType===Node.TEXT_NODE){if(child.textContent.trim())leaves.push(child);return;}
+            if(child.nodeType!==Node.ELEMENT_NODE||["SCRIPT","STYLE","IMG","IFRAME"].includes(child.tagName))return;
+            if(["UL","OL"].includes(child.tagName)||child.querySelector("p,div,h1,h2,h3,h4,h5,h6,li")){for(const item of child.childNodes)collect(item);}
+            else leaves.push(child);
+        }
+        for(const child of notesEditor.childNodes)collect(child);return leaves;
+    }
+    function notesRangeParts(range=notesRange){
+        if(!range||!notesEditor.contains(range.commonAncestorContainer))return [];
+        const blocks=notesBlocksFromDOM(notesEditor);
+        return notesLeafBlocks().flatMap((part,index)=>{
+            if(!range.intersectsNode(part)&&!part.contains(range.startContainer))return [];
+            const block=blocks[index];if(!block)return [];
+            const length=block.runs.reduce((sum,run)=>sum+run.text.length,0);
+            const at=(boundary,offset,fallback)=>{
+                if(!part.contains(boundary))return fallback;
+                const prefix=document.createRange();prefix.selectNodeContents(part);prefix.setEnd(boundary,offset);
+                return notesRuns(prefix.cloneContents()).reduce((sum,run)=>sum+run.text.length,0);
+            };
+            const start=at(range.startContainer,range.startOffset,0),end=at(range.endContainer,range.endOffset,length);
+            return end>start||(range.collapsed&&part.contains(range.startContainer))?[{node:part,index,block,start,end}]:[];
+        });
+    }
+    function notesBookmark(range=notesRange){
+        const parts=notesRangeParts(range);if(!parts.length)return null;
+        return {start:[parts[0].index,parts[0].start],end:[parts.at(-1).index,parts.at(-1).end]};
+    }
+    function notesSelectBookmark(bookmark){
+        if(!bookmark)return;
+        const leaves=notesLeafBlocks(),range=document.createRange();
+        function boundary([index,offset],start){
+            const block=leaves[Math.min(index,leaves.length-1)];if(!block)return false;
+            const walker=document.createTreeWalker(block,NodeFilter.SHOW_TEXT|NodeFilter.SHOW_ELEMENT),nodes=[];
+            if(block.nodeType===Node.TEXT_NODE)nodes.push(block);
+            let child;while((child=walker.nextNode()))if(child.nodeType===Node.TEXT_NODE||child.tagName==="BR")nodes.push(child);
+            for(const child of nodes){
+                const length=child.nodeType===Node.TEXT_NODE?child.length:1;
+                if(offset<length||(!start&&offset===length)||(child===nodes.at(-1)&&offset<=length)){
+                    if(child.nodeType===Node.TEXT_NODE)range[start?"setStart":"setEnd"](child,offset);
+                    else range[start?(offset?"setStartAfter":"setStartBefore"):(offset?"setEndAfter":"setEndBefore")](child);
+                    return true;
+                }offset-=length;
+            }
+            range[start?"setStart":"setEnd"](block,block.childNodes.length);return true;
+        }
+        if(!boundary(bookmark.start,true)||!boundary(bookmark.end,false))return;
+        notesRange=range;const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+    }
+    function notesRememberUndo(){
+        const snapshot={html:notesEditor.innerHTML,selection:notesBookmark(),read:notesReadMode};
+        notesRedoStack=[];
+        if(notesUndoStack.at(-1)?.html!==snapshot.html||notesUndoStack.at(-1)?.read!==snapshot.read){notesUndoStack.push(snapshot);if(notesUndoStack.length>50)notesUndoStack.shift();}
+    }
+    function notesUndo(){
+        if(!notesActive||!notesUndoStack.length||(notesReadMode&&!notesUndoStack.at(-1).read))return;
+        notesRedoStack.push({html:notesEditor.innerHTML,selection:notesBookmark(),read:notesReadMode});
+        const snapshot=notesUndoStack.pop();notesEditor.innerHTML=snapshot.html;
+        notesSelectBookmark(snapshot.selection);notesUpdateHeader(notesDocument());notesMarkChanged();notesPaintFormattingSelection();
+    }
+    function notesRedo(){
+        if(!notesActive||!notesRedoStack.length||(notesReadMode&&!notesRedoStack.at(-1).read))return;
+        notesUndoStack.push({html:notesEditor.innerHTML,selection:notesBookmark(),read:notesReadMode});
+        const snapshot=notesRedoStack.pop();notesEditor.innerHTML=snapshot.html;
+        notesSelectBookmark(snapshot.selection);notesUpdateHeader(notesDocument());notesMarkChanged();notesPaintFormattingSelection();
+    }
+    function notesTransformSelection(command,value){
+        const parts=notesRangeParts();if(!parts.length||notesRange.collapsed)return;
+        const selected=[];
+        for(const part of parts){let offset=0;for(const run of part.block.runs){const end=offset+run.text.length;if(end>part.start&&offset<part.end)selected.push({run,css:getComputedStyle(part.node.nodeType===Node.ELEMENT_NODE?part.node:part.node.parentElement)});offset=end;}}
+        const toggle=["bold","italic","underline"].includes(command)?!selected.every(({run,css})=>run[command]??(command==="bold"?Number(css.fontWeight)>=600:command==="italic"?css.fontStyle==="italic":css.textDecorationLine.includes("underline"))):false;
+        notesRememberUndo();const bookmark=notesBookmark();let sentenceStart=true,wordStart=true;
+        for(const part of parts){
+            let offset=0,selectedLength=0;const runs=[];
+            for(const run of part.block.runs){
+                const from=Math.max(0,part.start-offset),to=Math.min(run.text.length,part.end-offset);offset+=run.text.length;
+                if(to<=from){runs.push(run);continue;}
+                if(from)runs.push({...run,text:run.text.slice(0,from)});
+                let changed={...run,text:run.text.slice(from,to)};
+                if(command==="delete")changed=null;
+                else if(["bold","italic","underline"].includes(command))changed[command]=toggle;
+                else if(command==="hiliteColor")changed.highlight=value;
+                else if(command==="foreColor")changed.color=value;
+                else if(command==="fontName")changed.font_family=value;
+                else if(command==="fontSize")changed.font_size=value;
+                else if(command==="removeFormat")changed={text:changed.text,bold:false,italic:false,underline:false};
+                else if(command==="case"){
+                    changed.text=value==="upper"?changed.text.toLocaleUpperCase():changed.text.toLocaleLowerCase();
+                    if(value==="title")changed.text=Array.from(changed.text).map(char=>{const result=wordStart?char.toLocaleUpperCase():char;wordStart=!/\p{L}/u.test(char);return result;}).join("");
+                    if(value==="sentence")changed.text=Array.from(changed.text).map(char=>{let result=char;if(sentenceStart&&/\p{L}/u.test(char)){result=char.toLocaleUpperCase();sentenceStart=false;}if(/[.!?]/.test(char))sentenceStart=true;return result;}).join("");
+                }
+                if(changed){runs.push(changed);selectedLength+=changed.text.length;}
+                if(to<run.text.length)runs.push({...run,text:run.text.slice(to)});
+            }
+            const updated=notesBlockDOM({...part.block,runs});
+            if(part.node.nodeType===Node.ELEMENT_NODE)part.node.replaceChildren(...updated.childNodes);else part.node.replaceWith(updated);
+            if(part===parts.at(-1))bookmark.end=[part.index,part.start+selectedLength];
+        }
+        if(command==="delete")bookmark.end=[...bookmark.start];
+        notesSelectBookmark(bookmark);notesUpdateHeader(notesDocument());notesMarkChanged();
+    }
     function notesSourceBlocks(blocks){return (blocks||[]).filter(b=>b.type!=="image").map(block=>({
         type:notesDetectType(block.text||""),runs:(block.runs||[{text:block.text||""}]).map(run=>({text:run.text||"",
             ...((run.marks||[]).includes("strong")?{bold:true}:{}),...((run.marks||[]).includes("em")?{italic:true}:{}),
@@ -2074,6 +2318,7 @@
         catch(_){/* The live editor remains available if device storage is full. */}
     }
     function notesMarkChanged(){
+        element("NotesUndo").disabled=!notesUndoStack.length||(notesReadMode&&!notesUndoStack.at(-1).read);
         if(!notesActive)return;notesChanged=true;++notesSerial;notesStoreDraft();notesStatus("Saving locally…");
         clearTimeout(notesTimer);notesTimer=setTimeout(()=>saveSermonNotes().catch(error=>notesStatus(error.message,true)),650);
         notesRenderReferences();
@@ -2104,8 +2349,7 @@
         });return notesSaveChain;
     }
     async function loadSermonNotes(query=element("NotesSearch").value){
-        const firstLoad=!notesLoaded;const data=await api(apiBase+"/notes?"+new URLSearchParams({q:query}));notesItems=data.notes||[];notesLoaded=true;
-        if(firstLoad){const current=await api(apiBase+"/notes/job");if(current.job.running){clearTimeout(notesJobTimer);notesRenderJob(current.job);notesJobTimer=setTimeout(notesPollJob,500);}}
+        const data=await api(apiBase+"/notes?"+new URLSearchParams({q:query}));notesItems=data.notes||[];notesLoaded=true;
         element("NotesSync").disabled=!data.drive_configured;
         element("NotesSync").title=data.drive_configured?"Back up and restore your notes":"Drive connection is not configured";
         renderSermonNotesList();
@@ -2171,13 +2415,14 @@
         notesStatus(notesChanged?"Recovered an unsaved device draft. Press Save to keep it.":notesActive.conflict?"This sermon has a Drive conflict. Both versions are preserved.":"Saved locally"+(notesActive.dirty?" · Use Sync Notes to back up.":" · Synced"));
     }
     function renderSermonNote(){
+        notesUndoStack=[];notesRedoStack=[];notesEditingScroll=notesReadingScroll=0;
         element("NotesLibrary").hidden=true;element("NotesWorkspace").hidden=false;element("NotesExport").disabled=false;
         notesUpdateHeader();
         notesEditor.replaceChildren(...notesMetadataBlocks(notesActive.note).map(notesBlockDOM));
         if(!notesActive.note.content.blocks.some(block=>!["theme","text"].includes(block.type)))notesEditor.append(notesBlockDOM({type:"paragraph",runs:[]}));
         element("NotesConflict").hidden=!notesActive.conflict;
         element("NotesOrigin").textContent=notesActive.note.origin?"Imported from "+notesActive.note.origin.filename+". "+(notesActive.note.origin.format_note||""):"";
-        notesReadMode=false;notesSetReadMode(false);notesRenderReferences();
+        notesSetReadMode(false);notesSetTyping(false);notesRenderReferences();
     }
     function notesReferences(text){
         if(!notesReferencePattern){
@@ -2236,6 +2481,7 @@
             rect.width>0&&rect.height>0&&x>=rect.left&&x<=rect.right&&y>=rect.top&&y<=rect.bottom));
     }
     function notesPreviewEditorReference(item){
+        if(notesReadMode){previewVerse(item.reference);return;}
         const range=item.range.cloneRange();range.collapse(false);
         previewVerse(item.reference,{noteId:notesActive.id,range,referenceRange:item.range.cloneRange(),referenceText:item.range.toString()});
     }
@@ -2261,12 +2507,13 @@
         if(!item)return;
         // Let a double click or a drag select the text instead of opening a dialog.
         notesReferenceTimer=setTimeout(()=>{
-            if(!notesEditor.hidden&&!element("NotesPanel").hidden&&!element("NotesWorkspace").hidden&&document.activeElement===notesEditor&&!window.getSelection()?.toString())notesPreviewEditorReference(item);
+            if(!notesEditor.hidden&&!element("NotesPanel").hidden&&!element("NotesWorkspace").hidden&&(document.activeElement===notesEditor||!notesTyping)&&!window.getSelection()?.toString())notesPreviewEditorReference(item);
         },300);
     });
     document.addEventListener("pointerdown",event=>{if(!notesEditor.contains(event.target))clearTimeout(notesReferenceTimer);},true);
     notesEditor.addEventListener("keydown",event=>{
         clearTimeout(notesReferenceTimer);
+        if((event.ctrlKey||event.metaKey)&&["z","y"].includes(event.key.toLowerCase())){event.preventDefault();if(event.shiftKey||event.key.toLowerCase()==="y")notesRedo();else notesUndo();return;}
         if(event.key!=="Enter"||!event.altKey||event.isComposing)return;
         const selection=window.getSelection();if(!selection?.isCollapsed||!selection.anchorNode)return;
         const item=notesInlineReferences.find(item=>item.range.isPointInRange(selection.anchorNode,selection.anchorOffset));
@@ -2274,31 +2521,44 @@
     });
     element("Bible").addEventListener("scroll",()=>clearTimeout(notesReferenceTimer),{passive:true});
     function notesSetReadMode(read){
+        const changed=notesReadMode!==read,pane=element("Bible");
+        if(changed){if(read)notesEditingScroll=pane.scrollTop;else notesReadingScroll=pane.scrollTop;}
         notesCloseMenu();notesReadMode=read;element("NotesRead").textContent=read?"Edit Notes":"Read Notes";element("NotesRead").setAttribute("aria-pressed",String(read));
-        element("NotesFormat").hidden=read;notesEditor.hidden=read;element("NotesPreview").hidden=!read;
-        if(read){
-            const preview=element("NotesPreview");preview.replaceChildren();
-            for(const block of notesBlocksFromDOM(notesEditor)){
-                const text=block.runs.map(r=>r.text).join("");
-                const rendered=notesBlockDOM(block);
-                for(const reference of notesReferences(text).reverse()){
-                    const range=notesReferenceRange(rendered,text,reference);if(!range)continue;
-                    const link=node("button",undefined,"bs-scripture-ref");link.type="button";link.append(range.extractContents());range.insertNode(link);
-                    link.addEventListener("click",()=>previewVerse(reference));
-                }
-                preview.append(rendered);
-            }
-        }
+        notesSetTyping(false);
+        root.dataset.notesRead=String(read);element("NotesFormat").hidden=false;
+        const preview=element("NotesPreview");preview.hidden=!read;notesEditor.hidden=false;
+        // Reuse the same selectable document in both views. Its DOM, formatting
+        // ranges and Undo history survive entering/leaving focused reading.
+        if(read){if(notesEditor.parentElement!==preview)preview.append(notesEditor);}
+        else if(notesEditor.parentElement===preview)preview.before(notesEditor);
+        element("NotesModeHelp").textContent=read?"Select words to highlight or format.":"Choose Format to select words, or Keyboard to type.";
+        if(changed)window.getSelection()?.removeAllRanges();
+        notesRenderReferences();
+        notesUpdateReadingView();
+        if(changed){pane.scrollTop=read?notesReadingScroll:notesEditingScroll;requestAnimationFrame(()=>{pane.scrollTop=read?notesReadingScroll:notesEditingScroll;});}
     }
+    function notesUpdateReadingView(){
+        const focused=notesReadMode&&readerTab==="notes"&&touchNavigation()&&!element("NotesWorkspace").hidden;
+        document.body.classList.toggle("bs-notes-reading",focused);element("NotesBack").hidden=!focused;
+        notesUpdateModeSwitch();
+        positionWorkspaceTools();sizeWorkspace();
+    }
+    window.addEventListener("resize",notesUpdateReadingView);
+    element("NotesBack").addEventListener("click",()=>{notesSetReadMode(false);element("NotesRead").focus({preventScroll:true});});
+    document.addEventListener("keydown",event=>{
+        if(event.key==="Escape"&&document.body.classList.contains("bs-notes-reading")&&!root.querySelector("dialog[open]")){event.preventDefault();notesSetReadMode(false);element("NotesRead").focus({preventScroll:true});}
+    });
     document.addEventListener("selectionchange",()=>{
-        const selection=window.getSelection();if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode)){
+        const selection=window.getSelection();
+        if(notesKeyboardClosing&&notesRange&&!notesRange.collapsed&&(!selection?.rangeCount||selection.isCollapsed||!notesEditor.contains(selection.anchorNode)||!notesEditor.contains(selection.focusNode)))return;
+        if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode)&&notesEditor.contains(selection.focusNode)){
             if(notesMenuOpen&&selection.isCollapsed&&notesTools.contains(document.activeElement))return;
             notesRange=selection.getRangeAt(0).cloneRange();
             const parent=selection.anchorNode.nodeType===Node.ELEMENT_NODE?selection.anchorNode:selection.anchorNode.parentElement;
             if(parent){const css=getComputedStyle(parent),family=css.fontFamily.split(",")[0].replace(/^["']|["']$/g,"");
                 if(notesFonts.includes(family))element("NotesFont").value=family;
                 notesDisplaySize(Math.round(parseFloat(css.fontSize)*.75*10)/10);}
-            if(!selection.isCollapsed)notesShowSelectionTools();
+            if(!selection.isCollapsed){if(!notesSelecting)notesShowSelectionTools();}
             else if(performance.now()>=notesToolbarPointerUntil&&!notesTools.contains(document.activeElement))notesCloseMenu();
         }else if(performance.now()>=notesToolbarPointerUntil&&!notesTools.contains(document.activeElement))notesCloseMenu();
     });
@@ -2318,13 +2578,20 @@
         notesUpdateHeader(notesDocument());
         notesMarkChanged();
     });
-    notesEditor.addEventListener("paste",event=>{event.preventDefault();document.execCommand("insertText",false,event.clipboardData?.getData("text/plain")||"");notesMarkChanged();});
+    notesEditor.addEventListener("beforeinput",event=>{
+        if(!notesTyping){event.preventDefault();return;}
+        if(event.inputType==="historyUndo"){event.preventDefault();notesUndo();return;}
+        if(event.inputType==="historyRedo"){event.preventDefault();notesRedo();return;}
+        const selection=window.getSelection();if(selection?.rangeCount&&notesEditor.contains(selection.anchorNode))notesRange=selection.getRangeAt(0).cloneRange();
+        notesRememberUndo();
+    });
+    notesEditor.addEventListener("paste",event=>{event.preventDefault();if(!notesTyping)return;notesRememberUndo();document.execCommand("insertText",false,event.clipboardData?.getData("text/plain")||"");notesMarkChanged();});
     element("NotesFormat").addEventListener("mousedown",event=>{if(event.target.closest("button"))event.preventDefault();});
-    function notesRestoreSelection(){
-        notesEditor.focus({preventScroll:true});if(notesRange&&notesEditor.contains(notesRange.commonAncestorContainer)){const selection=window.getSelection();selection.removeAllRanges();selection.addRange(notesRange);}
-    }
     function notesFormat(command,value){
-        if(!notesActive||notesReadMode)return;const focus=document.activeElement;notesRestoreSelection();document.execCommand(command,false,value);notesMarkChanged();notesParkFormattingFocus(focus);
+        if(!notesActive||notesTyping||(notesReadMode&&["delete","case"].includes(command)))return;
+        const focus=document.activeElement;notesSetTyping(false,{close:false});
+        if(command==="undo")notesUndo();else notesTransformSelection(command,value);
+        notesParkFormattingFocus(focus);
     }
     element("NotesFormat").addEventListener("click",event=>{
         const command=event.target.closest("[data-notes-command]")?.dataset.notesCommand;if(!command)return;
@@ -2333,8 +2600,7 @@
     element("NotesFont").addEventListener("change",()=>notesFormat("fontName",element("NotesFont").value));
     function notesApplySize(value){
         if(!notesActive)return;const size=Math.max(6,Math.min(72,Number(value)||12));
-        const focus=document.activeElement;notesDisplaySize(size);notesRestoreSelection();document.execCommand("styleWithCSS",false,false);document.execCommand("fontSize",false,"7");
-        notesNormalizeFontSizes();notesMarkChanged();notesParkFormattingFocus(focus);
+        notesDisplaySize(size);notesFormat("fontSize",size);
     }
     element("NotesFontSize").addEventListener("change",()=>notesApplySize(element("NotesFontSize").value));
     const notesSizeSteps=[6,8,9,10,11,12,14,16,18,20,22,24,26,28,36,48,72];
@@ -2345,21 +2611,7 @@
     element("NotesCase").addEventListener("change",()=>{
         const mode=element("NotesCase").value;element("NotesCase").value="";
         if(!notesActive||!mode||!notesRange||notesRange.collapsed)return;
-        notesRestoreSelection();const range=window.getSelection().getRangeAt(0),walker=document.createTreeWalker(notesEditor,NodeFilter.SHOW_TEXT),pieces=[];let current;
-        while((current=walker.nextNode()))if(range.intersectsNode(current)){
-            const start=current===range.startContainer?range.startOffset:0,end=current===range.endContainer?range.endOffset:current.textContent.length;
-            pieces.push({node:current,start,end});
-        }
-        let sentenceStart=true,wordStart=true;
-        for(const piece of pieces){
-            const source=piece.node.textContent.slice(piece.start,piece.end);
-            let value=mode==="upper"?source.toLocaleUpperCase():source.toLocaleLowerCase();
-            if(mode==="title")value=Array.from(value).map(char=>{const result=wordStart?char.toLocaleUpperCase():char;wordStart=!/\p{L}/u.test(char);return result;}).join("");
-            if(mode==="sentence")value=Array.from(value).map(char=>{let result=char;if(sentenceStart&&/\p{L}/u.test(char)){result=char.toLocaleUpperCase();sentenceStart=false;}if(/[.!?]/.test(char))sentenceStart=true;return result;}).join("");
-            piece.node.textContent=piece.node.textContent.slice(0,piece.start)+value+piece.node.textContent.slice(piece.end);piece.newEnd=piece.start+value.length;
-        }
-        if(pieces.length){const selected=document.createRange();selected.setStart(pieces[0].node,pieces[0].start);selected.setEnd(pieces.at(-1).node,pieces.at(-1).newEnd);notesRange=selected;const selection=window.getSelection();selection.removeAllRanges();selection.addRange(selected);}
-        notesUpdateHeader(notesDocument());notesMarkChanged();notesParkFormattingFocus(element("NotesCase"));
+        notesFormat("case",mode);
     });
     function notesOpenMeta(edit=false,blocks=[],field="text"){
         notesEditingMeta=edit;notesPendingBlocks=blocks;
@@ -2395,15 +2647,20 @@
     async function notesInsertBlocks(blocks,insertionRange=null){
         if(!notesActive)throw Error("Open a sermon first.");
         const targetRange=insertionRange||notesRange;
-        selectReaderTab("notes");notesSetReadMode(false);notesEditor.focus();
-        const selection=window.getSelection();selection.removeAllRanges();
-        if(targetRange&&notesEditor.contains(targetRange.commonAncestorContainer)){const range=targetRange.cloneRange();range.collapse(false);selection.addRange(range);}
-        else{const range=document.createRange();range.selectNodeContents(notesEditor);range.collapse(false);selection.addRange(range);}
-        const container=node("div");for(const block of blocks)container.append(notesBlockDOM(block));
-        // Paragraph boundaries prevent the browser from merging a verse into
-        // a bold Text header or swallowing the words after the reference.
-        const html=insertionRange?"<p><br></p>"+container.innerHTML+"<p><br></p>":container.innerHTML;
-        document.execCommand("insertHTML",false,html);notesMarkChanged();await saveSermonNotes();
+        selectReaderTab("notes");notesSetReadMode(false);notesSetTyping(false);
+        const range=targetRange&&notesEditor.contains(targetRange.commonAncestorContainer)?targetRange.cloneRange():document.createRange();
+        if(!notesEditor.contains(range.commonAncestorContainer))range.selectNodeContents(notesEditor);
+        range.collapse(false);notesRange=range;notesRememberUndo();
+        const current=notesBlocksFromDOM(notesEditor),part=notesRangeParts(range)[0];let index=current.length;
+        if(part){
+            const before=[],after=[];let offset=0;
+            for(const run of part.block.runs){const cut=Math.max(0,Math.min(run.text.length,part.start-offset));offset+=run.text.length;if(cut)before.push({...run,text:run.text.slice(0,cut)});if(cut<run.text.length)after.push({...run,text:run.text.slice(cut)});}
+            const prefix=before.length?[{...part.block,runs:before}]:[],suffix=after.length?[{...part.block,type:["theme","text"].includes(part.block.type)?"paragraph":part.block.type,runs:after}]:[];
+            current.splice(part.index,1,...prefix,...blocks,...suffix);index=part.index+prefix.length;
+        }else current.push(...blocks);
+        notesEditor.replaceChildren(...current.map(notesBlockDOM));
+        const last=index+blocks.length-1,end=blocks.at(-1)?.runs?.reduce((sum,run)=>sum+run.text.length,0)||0;
+        notesSelectBookmark({start:[last,end],end:[last,end]});notesMarkChanged();await saveSermonNotes();
         toast("Added to sermon notes. Use Undo to remove the insertion.");
     }
     async function addToSermonNotes(blocks){
@@ -2535,7 +2792,7 @@
             const target = element("Verse" + state.verse);
             if (target && state.verse > 1) element("Bible").scrollTop += target.getBoundingClientRect().top - element("Bible").getBoundingClientRect().top - readerChromeHeight() - 20;
         }
-        positionWorkspaceTools();
+        notesUpdateReadingView();positionWorkspaceTools();
         if (name === "book") loadBookStudy();
         if (name === "notes" && !notesLoaded) loadSermonNotes().catch(error=>notesStatus(error.message,true));
         if (focus) element(({bible:"ReaderTab",book:"BookStudyTab",notes:"NotesTab"})[name]).focus();

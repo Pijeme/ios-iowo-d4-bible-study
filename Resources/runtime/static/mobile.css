@@ -247,3 +247,10 @@ body [hidden]{display:none!important}
 .mobile-launch-actions #mobileTutorials{order:2;background:#236c72ee;color:#fff;border-color:transparent}
 .mobile-launch-actions #mobilePublisher{order:1}
 .mobile-launch-actions #mobileOpenStudy{order:3}
+
+/* Keep the tablet notes and study banners aligned above independent panes. */
+.app-no-chrome #bibleStudyRoot .bs-fixed-study-heading .bs-study-header.bs-banner{height:auto;min-height:54px;margin:0;align-self:stretch;width:100%}
+@media(min-width:701px) and (max-width:1100px){
+ .app-no-chrome #bibleStudyRoot[data-mode=split] .bs-wide-tabs{grid-template-rows:34px;height:34px;min-height:34px;flex-basis:34px}
+ .app-no-chrome #bibleStudyRoot[data-mode=split] .bs-wide-tabs>.bs-study-tabs:not(.bs-reader-tabs) button{font-size:clamp(9px,1.25vw,11px);padding:3px 1px;line-height:11.5px;letter-spacing:-.04em}
+}

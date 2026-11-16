@@ -1,3 +1,20 @@
+## Notes input modes and focused reading, 16 November 2026
+
+The shared notes interface now matches the website and Android app, while
+retaining offline settings, account controls and the native PDF export hook.
+A compact translucent Format / Keyboard choice switches modes explicitly.
+Read Notes hides the choice, allows selection formatting without typing, and
+fills the available touch viewport with a Back to editing control. Tablet
+headers stay aligned and the right study tabs use compact labels.
+
+The offline-app browser workflow passes Chromium desktop/phone and WebKit
+phone, iPad portrait and landscape. Checks cover typing and saves, formatting,
+Undo, focused reading, reopening notes and native PDF handoff. Shared runtime
+assets match Android. The offline/source suite reports 38 tests, 35 passed
+and 3 skipped (browser suites and Android ELF audit); the main browser suite
+passed separately as above. No Apple SDK build, signing or IPA export was performed;
+the existing Mac handoff requirements still apply.
+
 # Work progress / handoff ? 10 November 2026
 
 ## Delivered
